@@ -16,4 +16,3 @@ My understanding this is caused by combination of multiple factors. Reconnect lo
 ## How to run
 * Install [Podman](https://podman.io/getting-started/installation)
 * Execute build.ps1 script to build and run MQ server.
-* Run the project in Debug mode (this is important for output purposes)
