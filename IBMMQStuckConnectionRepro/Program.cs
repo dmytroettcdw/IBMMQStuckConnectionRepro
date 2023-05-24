@@ -2,111 +2,99 @@
 using CliWrap;
 using IBM.WMQ;
 
-if (!File.Exists("mqclient.ini"))
-{
-    throw new InvalidOperationException("mqclient.ini file not found in exe directory");
-}
-
-const string QUEUE_MANAGER_NAME = "OM_QMGR";
-const string TEST_MESSAGE = "Hello World";
-
-Hashtable properties = new()
-{
-    { MQC.TRANSPORT_PROPERTY, MQC.TRANSPORT_MQSERIES_MANAGED },
-    /*
-     * It seems the issues is specifically with MQCNO_RECONNECT option
-     */
-    { MQC.CONNECT_OPTIONS_PROPERTY, MQC.MQCNO_RECONNECT + MQC.MQCNO_HANDLE_SHARE_BLOCK },
-    { MQC.HOST_NAME_PROPERTY, "localhost" },
-    { MQC.PORT_PROPERTY, 11415 },
-    { MQC.CHANNEL_PROPERTY, "DEV.APP.SVRCONN" }
-};
+if (!File.Exists("mqclient.ini")) throw new InvalidOperationException("mqclient.ini file not found in exe directory");
 
 Console.WriteLine("Starting MQ");
 
-await Cli.Wrap("podman")
-    .WithArguments("start QM_OMS")
-    .ExecuteAsync();
-    
-await Task.Delay(TimeSpan.FromSeconds(3));
+StartMq();
 
 Console.WriteLine("Connecting to MQ");
 
-using var queueManager = new MQQueueManager(QUEUE_MANAGER_NAME, properties);
-using var queue = queueManager.AccessQueue("CDW.OMS.CREATEORDER.INBOUND.Q", MQC.MQOO_INPUT_SHARED + MQC.MQOO_OUTPUT);
+ConnectAndOpenQueue(out var queueManager, out var queue);
 
 Console.WriteLine("Stopping MQ");
 
-await Cli.Wrap("podman")
-    .WithArguments("stop QM_OMS")
-    .ExecuteAsync();
-    
+StopMq();
+
 // this has to be longer than MQReconnectTimeout
-await Task.Delay(TimeSpan.FromSeconds(11));
+Thread.Sleep(TimeSpan.FromSeconds(11));
 
-MQPutMessageOptions putOpts = new()
-{
-    Options = MQC.MQPMO_NO_SYNCPOINT + MQC.MQPMO_SYNC_RESPONSE
-};
-
-MQMessage mqMessage = new()
-{
-    Format = MQC.MQFMT_STRING,
-    Persistence = MQC.MQPER_PERSISTENT
-};
-
-mqMessage.WriteString(TEST_MESSAGE);
 
 Console.WriteLine("Sending message to MQ");
 
 try
 {
-    queue.Put(mqMessage, putOpts);
+    PutMessage(ref queueManager, ref queue);
 }
-catch (Exception ex)
+catch (NullReferenceException)
 {
-    Console.WriteLine(ex);
-}
-
-if (!queueManager.IsConnected)
-{
-    throw new InvalidOperationException("MQ object goes into stuck state when IsConnected is true. Run again to try to reproduce the issue");
-}
-
-Console.WriteLine("MQQueueManager.IsConnected says we're still connected to MQ (in reality we're not). Sending message from different thread");
-
-try
-{
-    queue.Put(mqMessage, putOpts);
-}
-catch (Exception ex)
-{
-    Console.WriteLine(ex);
+    Console.WriteLine("NullReferenceException happened instead of MQException with MQRC_CONNECTION_BROKEN reason code");
+    if (queueManager.IsConnected)
+    {
+        Console.WriteLine("MQQueueManager.IsConnected wasn't updated and it should as per docs.");
+        Console.WriteLine("All subsequent calls to this queue manager will fail with NullReferenceException.");
+        Console.WriteLine("If subsequent call would be originated from different thread it will result in deadlock.");
+    }
 }
 
-// if we're here, we almost certainly were able to successfully reproduce the issue
-// switch the thread. TaskCreationOptions.LongRunning ensures we're running on new separate thread not shared with thread pool
-// `new Thread().Start()` should also work here.
-
-await Task.Factory.StartNew(() => SendMessage(queue, mqMessage, putOpts), TaskCreationOptions.LongRunning);
-
-static void SendMessage(MQQueue mqQueue, MQMessage mqMessage, MQPutMessageOptions mqPutMessageOptions)
+static void ConnectAndOpenQueue(out MQQueueManager queueManager, out MQQueue queue)
 {
-    Console.WriteLine("We're about to get stuck");
+    const string QUEUE_MANAGER_NAME = "OM_QMGR";
+
+    Hashtable properties = new()
+    {
+        { MQC.TRANSPORT_PROPERTY, MQC.TRANSPORT_MQSERIES_MANAGED },
+        { MQC.CONNECT_OPTIONS_PROPERTY, MQC.MQCNO_RECONNECT + MQC.MQCNO_HANDLE_SHARE_BLOCK },
+        { MQC.HOST_NAME_PROPERTY, "localhost" },
+        { MQC.PORT_PROPERTY, 11415 },
+        { MQC.CHANNEL_PROPERTY, "DEV.APP.SVRCONN" }
+    };
+
+    queueManager = new MQQueueManager(QUEUE_MANAGER_NAME, properties);
+    queue = queueManager.AccessQueue("CDW.OMS.CREATEORDER.INBOUND.Q", MQC.MQOO_INPUT_SHARED + MQC.MQOO_OUTPUT);
+}
+
+static void PutMessage(ref MQQueueManager queueManager, ref MQQueue queue, int retryCount = 1)
+{
+    const string TEST_MESSAGE = "Hello World";
 
     try
     {
-        mqQueue.Put(mqMessage, mqPutMessageOptions);
+        MQPutMessageOptions putOpts = new()
+        {
+            Options = MQC.MQPMO_NO_SYNCPOINT + MQC.MQPMO_SYNC_RESPONSE
+        };
+
+        MQMessage mqMessage = new()
+        {
+            Format = MQC.MQFMT_STRING,
+            Persistence = MQC.MQPER_PERSISTENT
+        };
+
+        mqMessage.WriteString(TEST_MESSAGE);
+        queue.Put(mqMessage, putOpts);
     }
-    catch (Exception ex)
+    catch (MQException ex) when (ex.Reason is MQC.MQRC_CONNECTION_BROKEN && retryCount-- > 0)
     {
-        Console.WriteLine(ex);
-    }
-    finally
-    {
-        Console.WriteLine("Nope, we're not stuck.");
+        ConnectAndOpenQueue(out queueManager, out queue);
+        PutMessage(ref queueManager, ref queue, retryCount);
     }
 }
 
+void StartMq()
+{
+    Cli.Wrap("podman")
+        .WithArguments("start QM_OMS")
+        .ExecuteAsync()
+        .Task.Wait();
 
+    Thread.Sleep(TimeSpan.FromSeconds(3));
+}
 
+void StopMq()
+{
+    Cli.Wrap("podman")
+        .WithArguments("stop QM_OMS")
+        .ExecuteAsync()
+        .Task.Wait();
+}
