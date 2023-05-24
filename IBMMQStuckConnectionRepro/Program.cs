@@ -31,9 +31,8 @@ catch (NullReferenceException)
     Console.WriteLine("NullReferenceException happened instead of MQException with MQRC_CONNECTION_BROKEN reason code");
     if (queueManager.IsConnected)
     {
-        Console.WriteLine("MQQueueManager.IsConnected wasn't updated and it should as per docs.");
-        Console.WriteLine("All subsequent calls to this queue manager will fail with NullReferenceException.");
-        Console.WriteLine("If subsequent call would be originated from different thread it will result in deadlock.");
+        Console.WriteLine("MQQueueManager.IsConnected wasn't updated as per docs.");
+        Console.WriteLine("Subsequent calls from different threads it will result in deadlock.");
     }
 }
 
